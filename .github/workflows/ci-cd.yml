@@ -1,0 +1,120 @@
+name: Test, build and deploy
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Finish an in-flight release before starting another one.
+concurrency:
+  group: todo-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      DB_PASSWORD: ci-only-database-password
+      JWT_SECRET: ci-only-signing-key-never-use-in-deployment
+      COOKIE_SECURE: "false"
+      AWS_REGION: ${{ vars.AWS_REGION }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+          cache-dependency-path: backend/pom.xml
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Backend tests, PostgreSQL integration tests and JAR
+        working-directory: backend
+        run: |
+          chmod +x mvnw
+          ./mvnw -B -ntp verify -Ppostgres-it
+      - name: Frontend checks and production build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm test
+          npm run build
+          npx playwright install --with-deps chromium
+          npm run test:e2e
+      - name: Build and smoke-test the actual container stack
+        run: |
+          docker compose build --build-arg APP_VERSION="$GITHUB_SHA"
+          docker compose up -d --wait --wait-timeout 180
+          curl --fail http://127.0.0.1:8088/healthz
+          curl --fail http://127.0.0.1:8088/api/auth/csrf
+      - name: Stop temporary CI stack
+        if: always()
+        run: docker compose down --volumes
+      - name: Assume AWS publishing role
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.AWS_DEPLOY_ENABLED == 'true'
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Publish tested images
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.AWS_DEPLOY_ENABLED == 'true'
+        env:
+          ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+        run: |
+          aws ecr get-login-password | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+          for component in backend frontend; do
+            repository="todo-$component"
+            if aws ecr describe-images --repository-name "$repository" --image-ids imageTag="$GITHUB_SHA" >/dev/null 2>&1; then
+              echo "$repository:$GITHUB_SHA already exists; immutable image will be reused."
+            else
+              docker tag "todo-$component:latest" "$ECR_REGISTRY/$repository:$GITHUB_SHA"
+              docker push "$ECR_REGISTRY/$repository:$GITHUB_SHA"
+            fi
+          done
+      - name: Keep failure reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: |
+            backend/target/surefire-reports
+            backend/target/failsafe-reports
+            frontend/test-results
+          retention-days: 7
+
+  deploy:
+    needs: verify
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.AWS_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+      EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+      IMAGE_TAG: ${{ github.sha }}
+      DB_MODE: ${{ vars.DB_MODE || 'database' }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Generate deployment commands
+        run: python3 deploy/make-ssm-command.py
+      - name: Update EC2 and wait for actual completion
+        run: |
+          command_id=$(aws ssm send-command --instance-ids "$EC2_INSTANCE_ID" --document-name AWS-RunShellScript --parameters file://ssm-command.json --query Command.CommandId --output text)
+          bash deploy/wait-ssm.sh "$command_id" "$EC2_INSTANCE_ID"

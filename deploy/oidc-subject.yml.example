@@ -1,0 +1,21 @@
+# Temporary diagnostic workflow: run on main, read only the sub claim, then delete.
+name: Inspect GitHub OIDC subject
+on: workflow_dispatch
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  subject:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print only the subject, never the bearer token
+        run: |
+          python3 - <<'PY'
+          import os, urllib.request, json, base64
+          url = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&audience=sts.amazonaws.com"
+          req = urllib.request.Request(url, headers={"Authorization": "Bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]})
+          token = json.load(urllib.request.urlopen(req))["value"]
+          part = token.split(".")[1]
+          claims = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
+          print("GitHubSubject=" + claims["sub"])
+          PY

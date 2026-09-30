@@ -1,0 +1,150 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Temporary Todo learning lab. Creates billable EC2, EBS and public IPv4 resources.
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  PublicSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Must belong to VpcId and have a route to an Internet Gateway.
+  GitHubSubject:
+    Type: String
+    Description: Exact GitHub OIDC sub claim for your repository's main branch. No wildcard.
+    AllowedPattern: "repo:[^*]+:ref:refs/heads/main"
+  ExistingOidcProviderArn:
+    Type: String
+    Default: ""
+    Description: Reuse the account's GitHub OIDC provider ARN if one already exists.
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.small, t3.medium]
+  LatestAmi:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+Conditions:
+  CreateOidc: !Equals [!Ref ExistingOidcProviderArn, ""]
+Resources:
+  GitHubOidc:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateOidc
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+  BackendRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: todo-backend
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration: {ScanOnPush: true}
+      EmptyOnDelete: true
+  FrontendRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: todo-frontend
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration: {ScanOnPush: true}
+      EmptyOnDelete: true
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Todo lab - SSM access only; no inbound rules
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ec2.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: PullImagesAndReadRuntimeConfig
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Effect: Allow
+                Action: [ecr:BatchGetImage, ecr:GetDownloadUrlForLayer, ecr:BatchCheckLayerAvailability]
+                Resource: [!GetAtt BackendRepository.Arn, !GetAtt FrontendRepository.Arn]
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/todo/lab/env
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+  AppInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmi
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      MetadataOptions: {HttpTokens: required, HttpPutResponseHopLimit: 1}
+      NetworkInterfaces:
+        - DeviceIndex: "0"
+          AssociatePublicIpAddress: true
+          SubnetId: !Ref PublicSubnetId
+          GroupSet: [!Ref AppSecurityGroup]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: {VolumeSize: 20, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true}
+      Tags: [{Key: Project, Value: TodoLearningLab}]
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          set -euo pipefail
+          dnf install -y docker
+          systemctl enable --now docker
+          mkdir -p /usr/local/lib/docker/cli-plugins /opt/todo/certs
+          cd /tmp
+          curl -fsSLO https://github.com/docker/compose/releases/download/v2.39.4/docker-compose-linux-x86_64
+          curl -fsSLO https://github.com/docker/compose/releases/download/v2.39.4/docker-compose-linux-x86_64.sha256
+          sha256sum -c docker-compose-linux-x86_64.sha256
+          install -m 0755 docker-compose-linux-x86_64 /usr/local/lib/docker/cli-plugins/docker-compose
+          docker compose version
+  GitHubRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If [CreateOidc, !Ref GitHubOidc, !Ref ExistingOidcProviderArn]
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Ref GitHubSubject
+      Policies:
+        - PolicyName: PublishAndDeployTodo
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Effect: Allow
+                Action: [ecr:BatchCheckLayerAvailability, ecr:InitiateLayerUpload, ecr:UploadLayerPart, ecr:CompleteLayerUpload, ecr:PutImage, ecr:DescribeImages]
+                Resource: [!GetAtt BackendRepository.Arn, !GetAtt FrontendRepository.Arn]
+              - Effect: Allow
+                Action: ssm:SendCommand
+                Resource:
+                  - !Sub arn:aws:ssm:${AWS::Region}::document/AWS-RunShellScript
+                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${AppInstance}
+              - Effect: Allow
+                Action: ssm:GetCommandInvocation
+                Resource: "*"
+Outputs:
+  InstanceId: {Value: !Ref AppInstance}
+  ApplicationSecurityGroup: {Value: !Ref AppSecurityGroup}
+  GitHubRoleArn: {Value: !GetAtt GitHubRole.Arn}
+  Registry: {Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com"}

@@ -1,0 +1,15 @@
+**/target/
+**/node_modules/
+**/dist/
+**/.local/
+**/.idea/
+.env
+.env.*
+!.env.example
+!.env.ec2.example
+*.log
+frontend/test-results/
+frontend/playwright-report/
+.tmp/
+**/.npm-cache/
+ssm-command.json
