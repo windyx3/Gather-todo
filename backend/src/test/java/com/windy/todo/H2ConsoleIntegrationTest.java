@@ -38,7 +38,7 @@ class H2ConsoleIntegrationTest {
         assertThat(login.statusCode()).isEqualTo(200);
         assertThat(login.body()).contains("name=\"h2query\"");
         var query = post("/h2-console/query.do?jsessionid=" + sessionId,
-                "sql=" + encode("SELECT COUNT(*) AS account_count FROM app_users"));
+                "sql=" + encode("SELECT COUNT(*) AS account_count FROM app_users WHERE role = 'USER'"));
         assertThat(query.statusCode()).isEqualTo(200);
         assertThat(query.body()).containsIgnoringCase("account_count").contains("<td>0</td>");
         assertThat(get("/h2-console/logout.do?jsessionid=" + sessionId).statusCode()).isEqualTo(200);

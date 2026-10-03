@@ -29,12 +29,24 @@ public class SecurityConfig {
         return new SecretKeySpec(bytes, "HmacSHA256");
     }
     @Bean JwtEncoder jwtEncoder(SecretKey key) { return new NimbusJwtEncoder(new ImmutableSecret<>(key)); }
-    @Bean JwtDecoder jwtDecoder(SecretKey key, @Value("${app.jwt.issuer}") String issuer, @Value("${app.jwt.audience}") String audience) {
+    @Bean JwtDecoder jwtDecoder(SecretKey key, UserRepository users, @Value("${app.jwt.issuer}") String issuer, @Value("${app.jwt.audience}") String audience) {
         var decoder = NimbusJwtDecoder.withSecretKey(key).macAlgorithm(MacAlgorithm.HS256).build();
         OAuth2TokenValidator<Jwt> audienceCheck = token -> token.getAudience().contains(audience)
                 ? OAuth2TokenValidatorResult.success()
                 : OAuth2TokenValidatorResult.failure(new OAuth2Error("invalid_token", "Invalid audience", null));
-        decoder.setJwtValidator(new DelegatingOAuth2TokenValidator<>(JwtValidators.createDefaultWithIssuer(issuer), audienceCheck));
+        // Account deletion/password reset must invalidate already-issued access tokens too.
+        OAuth2TokenValidator<Jwt> accountCheck = token -> {
+            try {
+                var user = users.findById(Long.parseLong(token.getSubject())).orElse(null);
+                Object version = token.getClaims().get("ver");
+                // Legacy tokens without ver are valid only until the first password reset.
+                if (user != null && ((version == null && user.tokenVersion == 0)
+                        || (version instanceof Number number && number.longValue() == user.tokenVersion)))
+                    return OAuth2TokenValidatorResult.success();
+            } catch (NumberFormatException | NullPointerException ignored) { }
+            return OAuth2TokenValidatorResult.failure(new OAuth2Error("invalid_token", "Account or session no longer valid", null));
+        };
+        decoder.setJwtValidator(new DelegatingOAuth2TokenValidator<>(JwtValidators.createDefaultWithIssuer(issuer), audienceCheck, accountCheck));
         return decoder;
     }
     @Bean PasswordEncoder passwordEncoder() { return new BCryptPasswordEncoder(12); }

@@ -1,0 +1,3 @@
+ALTER TABLE app_users ADD COLUMN role VARCHAR(10) NOT NULL DEFAULT 'USER';
+ALTER TABLE app_users ADD CONSTRAINT app_users_role_check CHECK (role IN ('USER', 'ADMIN'));
+ALTER TABLE app_users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0;

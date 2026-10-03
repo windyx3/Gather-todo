@@ -10,4 +10,7 @@ public interface RefreshRepository extends JpaRepository<RefreshSession, Long> {
     @Modifying(flushAutomatically = true)
     @Query("update RefreshSession r set r.revoked = true where r.familyId = :family")
     void revokeFamily(@Param("family") String family);
+    @Modifying(flushAutomatically = true)
+    @Query("delete from RefreshSession r where r.user.id = :userId")
+    void deleteForUser(@Param("userId") long userId);
 }

@@ -9,9 +9,12 @@ public final class ApiModels {
             @NotBlank @Size(min=10, max=72) String password, @NotBlank @Size(max=80) String displayName) {}
     public record LoginInput(@NotBlank @Email @Size(max=254) String email, @NotBlank @Size(max=72) String password) {}
     public record ProfileInput(@NotBlank @Size(max=80) String displayName) {}
-    public record UserResponse(Long id, String email, String displayName) {
-        static UserResponse of(AppUser u) { return new UserResponse(u.getId(), u.getEmail(), u.getDisplayName()); }
+    public record UserResponse(Long id, String email, String displayName, AppUser.Role role) {
+        static UserResponse of(AppUser u) { return new UserResponse(u.getId(), u.getEmail(), u.getDisplayName(), u.role); }
     }
+    public record AdminUserInput(@NotBlank @Email @Size(max=254) String email,
+            @NotBlank @Size(max=80) String displayName, @Size(min=10, max=72) String password) {}
+    public record UserPage(List<UserResponse> content, int page, int size, long totalElements, int totalPages) {}
     public record ProjectInput(@NotBlank @Size(max=100) String name) {}
     public record ProjectResponse(Long id, String name, Instant createdAt) {
         static ProjectResponse of(Project p) { return new ProjectResponse(p.id, p.name, p.createdAt); }

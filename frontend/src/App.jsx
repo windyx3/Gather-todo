@@ -1,5 +1,6 @@
 import { cloneElement, useEffect, useId, useRef, useState } from 'react';
 import { api, authenticate, restoreSession, logout, errorMessage } from './api';
+import AdminUsers from './AdminUsers';
 
 const emptyTask = { title: '', description: '', priority: 'MEDIUM', dueDate: '', completed: false };
 function Brand() { return <div className="brand"><span className="brand-mark">g.</span><span>gather<span className="brand-dot">.</span></span></div>; }
@@ -56,13 +57,14 @@ export default function App() {
   const [user, setUser] = useState(null), [initializing, setInitializing] = useState(true);
   const [projects, setProjects] = useState([]), [route, setRoute] = useState(location.hash || '#/all');
   const [page, setPage] = useState(0), [data, setData] = useState({ content: [], totalElements: 0, totalPages: 0 });
-  const [query, setQuery] = useState(''), [search, setSearch] = useState(''), [status, setStatus] = useState(''), [priority, setPriority] = useState('');
+  const [query, setQuery] = useState(''), [search, setSearch] = useState(''), [priority, setPriority] = useState('');
   const [sort, setSort] = useState('createdAt'), [editor, setEditor] = useState(null), [revision, setRevision] = useState(0);
   const [error, setError] = useState(''), [busy, setBusy] = useState(false), [loading, setLoading] = useState(false);
   const [projectName, setProjectName] = useState('');
   const projectId = route.startsWith('#/projects/') ? Number(route.split('/')[2]) : null;
   const selected = projects.find(p => p.id === projectId);
   const profile = route === '#/profile';
+  const completed = route === '#/completed', admin = route === '#/admin';
   useEffect(() => {
     restoreSession().then(setUser).catch(e => { if (e.status !== 401) setError(errorMessage(e)); }).finally(() => setInitializing(false));
     const expired = () => { setUser(null); setProjects([]); setEditor(null); setError('Your session has expired. Please sign in again.'); };
@@ -78,10 +80,10 @@ export default function App() {
     return () => { active = false; };
   }, [user, revision]);
   useEffect(() => {
-    if (!user || profile) return;
+    if (!user || profile || admin) return;
     let active = true; setLoading(true);
     const params = new URLSearchParams({ q: search, page, size: 10, sort, direction: sort === 'title' || sort === 'dueDate' ? 'asc' : 'desc' });
-    if (status) params.set('completed', status);
+    params.set('completed', completed ? 'true' : 'false');
     if (priority) params.set('priority', priority);
     api((projectId ? '/projects/' + projectId + '/tasks' : '/tasks') + '?' + params).then(result => {
       if (!active) return;
@@ -89,7 +91,7 @@ export default function App() {
       setData(result);
     }).catch(e => { if (active) { setError(errorMessage(e)); setData({ content: [], totalElements: 0, totalPages: 0 }); } }).finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [user, profile, projectId, page, search, status, priority, sort, revision]);
+  }, [user, profile, admin, completed, projectId, page, search, priority, sort, revision]);
   async function run(action) {
     if (busy) return; setBusy(true); setError('');
     try { await action(); setRevision(v => v + 1); } catch (e) { setError(errorMessage(e)); } finally { setBusy(false); }
@@ -102,31 +104,36 @@ export default function App() {
   if (!user) return <><ErrorBox message={error}/><Auth onLogin={value => { setUser(value); setError(''); }}/></>;
   return <div className="workspace"><aside className="sidebar"><Brand/><p className="workspace-label">PERSONAL WORKSPACE</p>
     <nav aria-label="Workspace"><a href="#/all" className={route === '#/all' ? 'active nav-item' : 'nav-item'}><span>▦</span>All tasks</a>
+      <a href="#/completed" className={completed ? 'active nav-item' : 'nav-item'}><span>✓</span>Completed</a>
+      {user.role === 'ADMIN' && <a href="#/admin" className={admin ? 'active nav-item' : 'nav-item'}><span>♙</span>Manage users</a>}
       <div className="nav-heading">YOUR PROJECTS <span>{projects.length}</span></div>
       {projects.map((p, i) => <a key={p.id} href={'#/projects/' + p.id} className={projectId === p.id ? 'active nav-item' : 'nav-item'}><span className={'project-dot dot-' + i % 3}></span>{p.name}</a>)}
     </nav>
     <form className="new-project" onSubmit={event => { event.preventDefault(); run(async () => { const p = await api('/projects', { method: 'POST', body: { name: projectName } }); setProjectName(''); location.hash = '/projects/' + p.id; }); }}>
       <label className="sr-only" htmlFor="project-name">New project name</label><input id="project-name" placeholder="New project name" value={projectName} onChange={e => setProjectName(e.target.value)} maxLength={100} required/><button aria-label="Create project" disabled={busy}>+</button>
     </form><div className="sidebar-note">Small steps.<br/><strong>Meaningful progress.</strong></div>
-    <a className="profile-link" href="#/profile"><span className="avatar">{user.displayName[0]?.toUpperCase()}</span><span>{user.displayName}<small>Personal account</small></span><span>↗</span></a>
+    <a className="profile-link" href="#/profile"><span className="avatar">{user.displayName[0]?.toUpperCase()}</span><span>{user.displayName}<small>{user.role === 'ADMIN' ? 'Administrator' : 'Personal account'}</small></span><span>↗</span></a>
     </aside>
-    <main className="main"><header className="topbar"><span className="breadcrumb">Workspace <span className="crumb">/</span> {profile ? 'Profile' : selected?.name || 'All tasks'}</span><div className="topbar-actions"><span className="today">{new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', weekday: 'short' })}</span><button className="secondary" disabled={busy} onClick={signOut}>Sign out</button></div></header>
+    <main className="main"><header className="topbar"><span className="breadcrumb">Workspace <span className="crumb">/</span> {profile ? 'Profile' : admin ? 'Manage users' : completed ? 'Completed' : selected?.name || 'All tasks'}</span><div className="topbar-actions"><span className="today">{new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', weekday: 'short' })}</span><button className="secondary" disabled={busy} onClick={signOut}>Sign out</button></div></header>
       <div className="content"><ErrorBox message={error}/>
-      {profile ? <Profile key={user.id} user={user} onUpdate={setUser} run={run} busy={busy}/> : <>
-        <div className="page-heading"><div><p className="eyebrow">MAKE SPACE FOR PROGRESS</p><h1>{selected?.name || 'All your next steps'}</h1><p className="muted">A clear view of what matters. Take it one task at a time.</p></div>
-        <button className="primary" disabled={busy || !selected} title={selected ? 'Create a task' : 'Select or create a project first'} onClick={() => setEditor({})}>＋ New task</button></div>
-        {selected && <div className="project-actions"><button className="text-button" disabled={busy} onClick={() => { const name = prompt('Project name', selected.name); if (name?.trim()) run(() => api('/projects/' + selected.id, { method: 'PUT', body: { name } })); }}>Rename project</button><button className="text-button danger" disabled={busy} onClick={() => { if (confirm('Delete this project? It must be empty.')) run(async () => { await api('/projects/' + selected.id, { method: 'DELETE' }); location.hash = '/all'; }); }}>Delete project</button></div>}
-        <section className="task-panel"><div className="panel-heading"><h2>Your tasks <span className="count">{data.totalElements}</span></h2><span className="muted small">Your pace. Your priorities. Deployed with GitHub Actions.</span></div>
+      {profile ? <Profile key={user.id} user={user} onUpdate={setUser} run={run} busy={busy}/> : admin ? user.role === 'ADMIN' ?
+        <AdminUsers currentUser={user} onUpdate={setUser} onPasswordReset={signOut}/> : <section><h1>Administrator access required</h1><p className="muted">This page is available to administrators.</p></section> : <>
+        <div className="page-heading"><div><p className="eyebrow">MAKE SPACE FOR PROGRESS</p><h1>{completed ? 'Completed tasks' : selected?.name || 'All your next steps'}</h1><p className="muted">{completed ? 'Finished work, all in one place. Restore a task whenever you need it.' : 'A clear view of what matters. Take it one task at a time.'}</p></div>
+        {!completed && <button className="primary" disabled={busy || !selected} title={selected ? 'Create a task' : 'Select or create a project first'} onClick={() => setEditor({})}>＋ New task</button>}</div>
+        {selected && <div className="project-actions"><button className="text-button" disabled={busy} onClick={() => { const name = prompt('Project name', selected.name); if (name?.trim()) run(() => api('/projects/' + selected.id, { method: 'PUT', body: { name } })); }}>Rename project</button><button className="text-button danger" disabled={busy} onClick={() => { if (confirm('Delete this project and all its tasks, including completed tasks? This cannot be undone.')) run(async () => { await api('/projects/' + selected.id, { method: 'DELETE' }); location.hash = '/all'; }); }}>Delete project</button></div>}
+        <section className="task-panel"><div className="panel-heading"><h2>{completed ? 'Finished tasks' : 'Your tasks'} <span className="count">{data.totalElements}</span></h2><span className="muted small">Your pace. Your priorities.</span></div>
           <div className="filters"><label className="search"><span>⌕</span><input aria-label="Search tasks" placeholder="Search tasks…" value={query} onChange={e => setQuery(e.target.value)} maxLength={200}/></label>
-          <select aria-label="Filter status" value={status} onChange={e => { setStatus(e.target.value); setPage(0); }}><option value="">All statuses</option><option value="false">To do</option><option value="true">Completed</option></select>
           <select aria-label="Filter priority" value={priority} onChange={e => { setPriority(e.target.value); setPage(0); }}><option value="">All priorities</option><option>HIGH</option><option>MEDIUM</option><option>LOW</option></select>
           <select aria-label="Sort tasks" value={sort} onChange={e => { setSort(e.target.value); setPage(0); }}><option value="createdAt">Newest first</option><option value="dueDate">Due date</option><option value="title">Title A–Z</option><option value="updatedAt">Recently updated</option></select></div>
           <div aria-live="polite" className="task-list">{loading ? <div className="empty">Loading your tasks…</div> : data.content.length ? data.content.map(task => <article className={'task-row' + (task.completed ? ' completed' : '')} key={task.id}>
-            <input aria-label={'Complete ' + task.title} type="checkbox" checked={task.completed} disabled={busy} onChange={() => run(() => api('/tasks/' + task.id, { method: 'PUT', body: { title: task.title, description: task.description, priority: task.priority, dueDate: task.dueDate, completed: !task.completed } }))}/>
-            <div className="task-info"><button className="task-title" onClick={() => setEditor(task)}>{task.title}</button><p>{task.description || projects.find(p => p.id === task.projectId)?.name}</p></div>
+            <input aria-label={(task.completed ? 'Restore ' : 'Complete ') + task.title} type="checkbox" checked={task.completed} disabled={busy} onChange={() => run(() => api('/tasks/' + task.id, { method: 'PUT', body: { title: task.title, description: task.description, priority: task.priority, dueDate: task.dueDate, completed: !task.completed } }))}/>
+            <div className="task-info">
+              <button className="task-title" onClick={() => setEditor(task)}>{task.title}</button>
+              <p>{completed ? projects.find(p => p.id === task.projectId)?.name : task.description || projects.find(p => p.id === task.projectId)?.name}</p>
+            </div>
             <span className={'priority priority-' + task.priority.toLowerCase()}>{task.priority.toLowerCase()}</span><span className="due">{task.dueDate ? new Date(task.dueDate + 'T12:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : 'No date'}</span>
             <button className="icon-button delete-task" aria-label={'Delete ' + task.title} disabled={busy} onClick={() => { if (confirm('Delete “' + task.title + '”?')) run(() => api('/tasks/' + task.id, { method: 'DELETE' })); }}>×</button>
-          </article>) : <div className="empty"><span className="empty-icon">✓</span><h3>{projects.length ? 'A little breathing room.' : 'Your next chapter starts here.'}</h3><p>{projects.length ? selected ? 'Add a task, or adjust your filters to find what you need.' : 'Select a project to add a task.' : 'Create your first project in the sidebar, then add a task.'}</p></div>}</div>
+          </article>) : <div className="empty"><span className="empty-icon">✓</span><h3>{completed ? 'No completed tasks here yet.' : projects.length ? 'A little breathing room.' : 'Your next chapter starts here.'}</h3><p>{completed ? 'Completed tasks appear here. Try adjusting your filters.' : projects.length ? selected ? 'Add a task, or adjust your filters to find what you need.' : 'Select a project to add a task.' : 'Create your first project in the sidebar, then add a task.'}</p></div>}</div>
           <footer className="pagination"><span>{data.totalElements} matching tasks</span><div><button className="secondary" disabled={loading || page === 0} onClick={() => setPage(p => p - 1)}>← Previous</button><span>{page + 1} / {Math.max(data.totalPages, 1)}</span><button className="secondary" disabled={loading || page + 1 >= data.totalPages} onClick={() => setPage(p => p + 1)}>Next →</button></div></footer>
         </section><p className="bottom-note">One thing at a time is still moving forward.</p></>}
       </div>

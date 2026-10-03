@@ -27,12 +27,22 @@ This repository contains the frontend, REST API, database migrations, automated 
 - Registration, login, logout and profile editing.
 - Private projects and tasks with ownership checks on the backend.
 - Task descriptions, priorities, due dates and completion status.
-- Search, status and priority filters, pagination and sorting.
+- A dedicated Completed view; unfinished tasks stay in All tasks and project views.
+- Search and priority filters, pagination and sorting.
+- Administrator account management: search, edit details, reset passwords and delete users with their workspace.
 - Flyway database migrations and JPA schema validation.
 - Short-lived JWT access tokens and rotating refresh sessions.
 - Docker Compose development stack and GitHub Actions verification/deployment.
 
-Task priorities are `LOW`, `MEDIUM` and `HIGH`. Deleting a project that still has tasks returns `409 Conflict`; resource operations belonging to another user return `404`. The frontend includes project navigation, an all-tasks view and responsive layouts.
+Task priorities are `LOW`, `MEDIUM` and `HIGH`. Completing a task moves it to **Completed**; unchecking it there restores it to its original project. Deleting a project removes its active and completed tasks in the same transaction. Resource operations belonging to another user return `404`, including ordinary workspace requests made by an administrator. The frontend includes project navigation, All tasks, Completed and responsive layouts.
+
+### Administrator account
+
+The initial local account is **`admin@qq.com` / `admin`**. Sign in normally, then open **Manage users** in the sidebar. The administrator can also use their own projects and tasks. Account editing supports display name, email and an optional new password. Deleting a user removes their projects, tasks and refresh sessions. Administrator accounts cannot be deleted, and their email cannot be changed through the account editor.
+
+[`AdminBootstrap.java`](backend/src/main/java/com/windy/todo/AdminBootstrap.java) creates this account once, storing a BCrypt hash. [`application.properties`](backend/src/main/resources/application.properties) supplies defaults through `ADMIN_EMAIL` and `ADMIN_PASSWORD`; an existing administrator's password is never overwritten on restart. An existing ordinary account at the configured email causes startup to fail rather than silently granting it administrator rights. Public registration reserves that email and always creates a `USER`.
+
+For deployment, set `ADMIN_PASSWORD` explicitly in the runtime configuration; EC2 Compose requires it. Changing this variable after the account exists does not reset its password: use Manage users to set a new one.
 
 ## Architecture
 
@@ -191,6 +201,8 @@ The default backend profile uses PostgreSQL:
 | `COOKIE_SECURE` | Defaults to `true`; local HTTP/SSM-tunnel lab uses `false` |
 | `ALLOWED_ORIGINS` | Comma-separated origins; backend default `http://localhost:5173` |
 | `APP_VERSION` | Backend release identifier; defaults to `local` |
+| `ADMIN_EMAIL` | Bootstrap administrator email; defaults to `admin@qq.com` |
+| `ADMIN_PASSWORD` | Initial administrator password; local default `admin`, required explicitly by EC2 Compose |
 
 Root Compose sets `DB_URL=jdbc:postgresql://postgres:5432/todo` so the backend reaches the database by its service name. EC2 Compose reads its runtime environment file and sets the browser origin to `http://localhost:8088`.
 
@@ -204,7 +216,7 @@ The root `.env` is consumed by Docker Compose. Maven and `java -jar` **do not au
 
 | Table | Purpose |
 | --- | --- |
-| `app_users` | Unique email, BCrypt password hash and display name |
+| `app_users` | Unique email, BCrypt password hash, display name, role and token version |
 | `projects` | Name, owner and creation timestamp |
 | `tasks` | Project association, content, priority, due date, completion and timestamps |
 | `refresh_sessions` | Token hash, user, session family, expiry and revocation state |
@@ -212,11 +224,13 @@ The root `.env` is consumed by Docker Compose. Maven and `java -jar` **do not au
 
 Relationships are **user → projects → tasks** and **user → refresh sessions**. Foreign keys enforce associations; indexes support ownership, task filtering and refresh-family queries.
 
+[`V2__admin_accounts.sql`](backend/src/main/resources/db/migration/V2__admin_accounts.sql) adds `role` (`USER`/`ADMIN`) and `token_version`. Existing accounts retain their data and become `USER` with token version zero. Project/user deletion uses ordered bulk deletes inside a service transaction, preserving foreign-key integrity.
+
 Flyway migrates the database during startup, then Hibernate validates entity/schema compatibility through `spring.jpa.hibernate.ddl-auto=validate`. Add new versioned migrations for future schema changes rather than modifying applied ones. Local Compose stores PostgreSQL data in a named volume; the EC2 configuration uses `todo_postgres_data`.
 
 ## REST API
 
-Base path: `/api`. JSON bodies use camelCase. Protected routes require a bearer token; POST/PUT/DELETE requests also require CSRF protection.
+Base path: `/api`. JSON bodies use camelCase. Protected routes require a bearer token. Cookie-based authentication mutations require CSRF protection; Spring Security exempts requests carrying a Bearer token. The browser client sends CSRF headers on every mutation.
 
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
@@ -231,6 +245,8 @@ Base path: `/api`. JSON bodies use camelCase. Protected routes require a bearer 
 | GET | `/tasks` | List tasks across the user's projects |
 | GET / POST | `/projects/{projectId}/tasks` | List/create tasks in a project |
 | GET / PUT / DELETE | `/tasks/{id}` | Read/update/delete a task |
+| GET | `/admin/users` | Administrator-only user search; `q`, `page`, `size` |
+| PUT / DELETE | `/admin/users/{id}` | Administrator-only edit/password reset or account/workspace deletion |
 | GET | `/version` | Read the backend release identifier |
 
 Registration body:
@@ -260,7 +276,7 @@ Task-list parameters:
 | Parameter | Accepted values / behavior |
 | --- | --- |
 | `q` | Search title/description; maximum 200 characters |
-| `completed` | `true` or `false`; omit for both |
+| `completed` | `true` selects completed tasks; `false` or omission selects unfinished tasks |
 | `priority` | `LOW`, `MEDIUM`, `HIGH` |
 | `page` | Zero-based index; default `0` |
 | `size` | `1`–`100`; default `10` |
@@ -295,24 +311,30 @@ npm run test:e2e
 
 The backend `verify` command builds `backend/target/todo.jar`, which Playwright needs. Playwright starts its own H2-backed backend and Vite server on ports 18080 and 15173. On Linux, browser installation can require `npx playwright install --with-deps chromium`.
 
-Tests cover authentication, refresh-token rotation/reuse, CSRF, ownership isolation, project/task operations, filtering and browser workflows. CI also builds and smoke-tests the actual Compose stack before publishing images.
+Tests cover authentication, refresh-token rotation/reuse, CSRF, ownership isolation, completed-task movement/restoration, project cleanup, administrator permissions and account/session cleanup. Browser workflows exercise these behaviors and mobile layouts. CI also builds and smoke-tests the actual Compose stack before publishing images.
 
 | Test | Coverage |
 | --- | --- |
-| `ApiIntegrationTest` | API validation, authentication, profiles, CRUD, filtering, ownership, CSRF and refresh sessions |
+| `ApiIntegrationTest` | API validation, authentication, profiles, CRUD, completed views, cleanup, admin access, ownership and sessions |
+| `AccountMigrationTest` | Upgrade a V1 database while preserving an existing account |
+| `AdminBootstrapTest` | Preserve existing admin credentials; refuse to promote an existing ordinary user |
 | `PostgresIT` | API integration scenarios against PostgreSQL 17 through Testcontainers |
 | `H2ConsoleIntegrationTest` | Local console access and separation from API security |
 | `TodoApplicationTests` | Application context startup |
 | `frontend/src/api.test.js` | Frontend API client |
-| `frontend/e2e/workspace.spec.js` | Browser workspace flow, session behavior, user isolation and responsive interactions |
+| `frontend/e2e/workspace.spec.js` | Completed/restored tasks, project cleanup, admin editing/reset/deletion, session behavior and responsive layouts |
 
 ## Security behavior
 
-Passwords use BCrypt. Access tokens are kept in frontend memory; refresh tokens are stored in an HttpOnly, SameSite=Strict cookie and their hashes are stored in the database. Refresh-token reuse revokes the associated session family. Mutating requests require a CSRF token.
+Passwords use BCrypt. Access tokens are kept in frontend memory; refresh tokens are stored in an HttpOnly, SameSite=Strict cookie and their hashes are stored in the database. Refresh-token reuse revokes the associated session family. Cookie-based authentication mutations require a CSRF token; Bearer-authenticated API requests are exempt, although the SPA sends CSRF headers for both.
 
 Access tokens use HS256 with issuer `todo-api`, audience `todo-web` and a **ten-minute** lifetime. Refresh families expire **seven days** after the initial login/registration; rotation does not extend that deadline. Passwords use BCrypt strength **12** and are limited to 72 UTF-8 bytes. Refresh tokens are random values stored as SHA-256 hashes.
 
 The frontend sends `Authorization: Bearer ...` on protected requests and `X-XSRF-TOKEN` on mutations. Refresh cookies are scoped to `/api/auth`. Client refresh operations are serialized, including across tabs when Web Locks is available. Logout revokes the refresh family and clears its cookie; already-issued access JWTs remain valid until expiry.
+
+JWT validation also reads the account from the database and compares the signed `ver` claim with `token_version`. Administrator password resets increment that version and remove refresh sessions; deletion removes the account. Previously issued access/refresh credentials then fail on subsequent requests. Legacy access tokens without `ver` are accepted only while the stored version remains zero. This account lookup means access-token validation depends on database availability.
+
+Administrator endpoints check the current database role in the service layer. Hiding Manage users in the frontend is only presentation: ordinary accounts also receive `403` from the backend, even with a forged role claim in an otherwise valid token. User responses never contain password hashes or session credentials. Administrator account management does not grant access to other users' task APIs.
 
 The API checks resource ownership using the authenticated user identity. The H2 console is available only in the local profile. Nginx applies a rate limit to registration and login.
 
@@ -360,6 +382,8 @@ DB_PASSWORD=<application-role-password>
 DB_URL=jdbc:postgresql://<rds-endpoint>:5432/todo?sslmode=verify-full&sslrootcert=/certs/global-bundle.pem
 JWT_SECRET=<existing-signing-secret>
 COOKIE_SECURE=false
+ADMIN_EMAIL=admin@qq.com
+ADMIN_PASSWORD=<initial-administrator-password>
 ```
 
 The CA bundle is mounted read-only from `/opt/todo/certs` to `/certs`. Preserve the JWT signing key when changing database settings. Mode `rds` does not automatically stop an already-running local PostgreSQL container.

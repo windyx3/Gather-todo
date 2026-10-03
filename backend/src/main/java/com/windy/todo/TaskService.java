@@ -3,8 +3,6 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.data.domain.*;
 import org.springframework.data.jpa.domain.Specification;
-import org.springframework.http.HttpStatus;
-import org.springframework.web.server.ResponseStatusException;
 import java.util.*;
 import static com.windy.todo.ApiModels.*;
 
@@ -28,7 +26,7 @@ public class TaskService {
     }
     public void deleteProject(long userId, long id) {
         var p = project(userId, id);
-        if (tasks.existsByProjectId(id)) throw new ResponseStatusException(HttpStatus.CONFLICT, "Delete this project's tasks first");
+        tasks.deleteForProject(id);
         projects.delete(p);
     }
     private Project project(long userId, long id) { return projects.findByIdAndOwnerId(id, userId).orElseThrow(ApiErrors::notFound); }
@@ -44,7 +42,7 @@ public class TaskService {
             var predicates = new ArrayList<jakarta.persistence.criteria.Predicate>();
             predicates.add(cb.equal(root.get("project").get("owner").get("id"), userId));
             if (projectId != null) predicates.add(cb.equal(root.get("project").get("id"), projectId));
-            if (completed != null) predicates.add(cb.equal(root.get("completed"), completed));
+            predicates.add(cb.equal(root.get("completed"), Boolean.TRUE.equals(completed)));
             if (priority != null) predicates.add(cb.equal(root.get("priority"), priority));
             if (!query.isBlank()) {
                 String term = "%" + query.trim().toLowerCase(Locale.ROOT).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%";

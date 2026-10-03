@@ -19,15 +19,18 @@ public class AuthService {
     private final RefreshRepository sessions;
     private final PasswordEncoder passwords;
     private final JwtEncoder encoder;
-    private final String issuer, audience, dummyHash;
+    private final String issuer, audience, dummyHash, adminEmail;
     private final SecureRandom random = new SecureRandom();
     public AuthService(UserRepository users, RefreshRepository sessions, PasswordEncoder passwords, JwtEncoder encoder,
-            @Value("${app.jwt.issuer}") String issuer, @Value("${app.jwt.audience}") String audience) {
+            @Value("${app.jwt.issuer}") String issuer, @Value("${app.jwt.audience}") String audience,
+            @Value("${app.admin.email}") String adminEmail) {
         this.users = users; this.sessions = sessions; this.passwords = passwords; this.encoder = encoder;
         this.issuer = issuer; this.audience = audience; this.dummyHash = passwords.encode(UUID.randomUUID().toString());
+        this.adminEmail = normalize(adminEmail);
     }
     public SessionResult register(RegisterInput input) {
         validatePasswordBytes(input.password());
+        if (normalize(input.email()).equals(adminEmail)) throw ApiErrors.badRequest("This email is reserved for the administrator");
         var user = users.saveAndFlush(new AppUser(normalize(input.email()), passwords.encode(input.password()), input.displayName().trim()));
         return issue(user, UUID.randomUUID().toString(), Instant.now().plus(Duration.ofDays(7)));
     }
@@ -65,7 +68,8 @@ public class AuthService {
         sessions.save(new RefreshSession(user, hash(raw), familyId, expiry));
         Instant now = Instant.now();
         var claims = JwtClaimsSet.builder().issuer(issuer).audience(List.of(audience)).subject(user.getId().toString())
-                .issuedAt(now).expiresAt(now.plusSeconds(600)).id(UUID.randomUUID().toString()).build();
+                .issuedAt(now).expiresAt(now.plusSeconds(600)).id(UUID.randomUUID().toString())
+                .claim("ver", user.tokenVersion).build();
         String token = encoder.encode(JwtEncoderParameters.from(JwsHeader.with(MacAlgorithm.HS256).build(), claims)).getTokenValue();
         return new SessionResult(new AuthResponse(token, 600, UserResponse.of(user)), raw, expiry);
     }
@@ -74,7 +78,7 @@ public class AuthService {
         catch (NoSuchAlgorithmException e) { throw new IllegalStateException(e); }
     }
     private static String normalize(String email) { return email.trim().toLowerCase(Locale.ROOT); }
-    private static void validatePasswordBytes(String password) {
+    static void validatePasswordBytes(String password) {
         if (password.getBytes(StandardCharsets.UTF_8).length > 72) throw ApiErrors.badRequest("Password must be at most 72 UTF-8 bytes");
     }
 }
