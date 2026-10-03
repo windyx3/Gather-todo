@@ -4,6 +4,10 @@ A full-stack task workspace built with **React, Spring Boot and PostgreSQL**. Us
 
 This repository contains the frontend, REST API, database migrations, automated tests, Docker configuration and AWS deployment pipeline. This README describes the whole application, including Spring Boot assembly, local development and deployment.
 
+## Demo
+
+[Download the demo video (MP4)](docs/media/gather-todo-demo.mp4)
+
 ## Contents
 
 - [Features](#features)
